@@ -77,9 +77,7 @@ def _normalize_raw_config(raw: dict[str, Any]) -> dict[str, Any]:
 
     artifacts_log_file = raw.get("artifacts_log_file")
     if artifacts_log_file is None:
-        artifacts_log_file = raw.get("assessment", {}).get(
-            "log_file", "logs/ai_consensus_artifacts.jsonl"
-        )
+        artifacts_log_file = "logs/ai_consensus_artifacts.jsonl"
 
     return {
         "language": language,
