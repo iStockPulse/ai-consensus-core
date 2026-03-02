@@ -67,9 +67,13 @@ def _normalize_raw_config(raw: dict[str, Any]) -> dict[str, Any]:
 
     prompts = raw.get("prompts", {})
     consensus = raw.get("consensus", {})
-    language = raw.get("language")
-    if language is None:
-        language = raw.get("assessment", {}).get("language", "en")
+    language_raw = raw.get("language")
+    if language_raw is None:
+        language_raw = raw.get("assessment", {}).get("language")
+    if isinstance(language_raw, str):
+        language = language_raw.strip().lower() or "en"
+    else:
+        language = "en"
 
     artifacts_log_file = raw.get("artifacts_log_file")
     if artifacts_log_file is None:
@@ -159,7 +163,9 @@ def load_package_config(
     }
 
     prompts = PromptSettings(
-        default_system_prompt_path=prompts_raw.get("default_system_prompt_path"),
+        default_system_prompt_path=prompts_raw.get(
+            "default_system_prompt_path"
+        ),
         default_user_prompt_path=prompts_raw.get("default_user_prompt_path"),
         provider_system_prompt_paths=dict(
             prompts_raw.get("provider_system_prompt_paths", {})
@@ -178,12 +184,14 @@ def load_package_config(
     )
 
     return PackageConfig(
-        language=str(normalized.get("language", "en")),
+        language=str(normalized.get("language") or "en"),
         providers=providers,
         prompts=prompts,
         consensus=consensus,
         artifacts_log_file=str(
-            normalized.get("artifacts_log_file", "logs/ai_consensus_artifacts.jsonl")
+            normalized.get(
+                "artifacts_log_file", "logs/ai_consensus_artifacts.jsonl"
+            )
         ),
         default_investigation_instructions=str(
             normalized.get("default_investigation_instructions", "")

@@ -25,7 +25,7 @@ Add one of these lines to `requirements.txt`:
 ai-consensus-core>=0.1.0
 
 # or install directly from GitHub (before/without PyPI)
-git+https://github.com/<org>/<repo>.git
+git+https://github.com/iStockPulse/ai-consensus-core.git
 ```
 
 Then:
@@ -43,7 +43,7 @@ uv add ai-consensus-core
 Or from GitHub:
 
 ```bash
-uv add git+https://github.com/<org>/<repo>.git
+uv add git+https://github.com/iStockPulse/ai-consensus-core.git
 ```
 
 ### Option 3: local editable dependency (monorepo)
@@ -111,11 +111,11 @@ print(result.consensus.field_probabilities)
 - `config_yaml`: YAML content string
 - `runtime_overrides`: in-memory override mapping merged on top
 
+`language` is optional in YAML. If omitted (or empty/null), it defaults to `en`.
+
 ## Minimal Config Example
 
 ```yaml
-language: "en"
-
 prompts:
   default_system_prompt_path: "prompts/default_system.md"
   default_user_prompt_path: "prompts/default_user.md"
@@ -175,8 +175,81 @@ ai_providers:
 
 ### Use a single AI provider
 
-Set one provider `enabled: true`, all others `enabled: false`.
+Set your target provider `enabled: true`.
+Any provider missing from config is treated as disabled automatically.
 You still get the same normalized response model and artifact logging.
+
+If you only need one structured provider response, read the first successful
+item from `provider_results`:
+
+```python
+from pathlib import Path
+
+from ai_consensus_core import InvestigationRequest, UnifiedAIClient
+
+prompts_dir = Path("examples/prompts").resolve()
+
+client = UnifiedAIClient(
+    config_yaml=f"""
+prompts:
+  default_system_prompt_path: "{prompts_dir / 'default_system.md'}"
+  default_user_prompt_path: "{prompts_dir / 'default_user.md'}"
+  provider_system_prompt_paths:
+    openai: "{prompts_dir / 'openai_system_alt.md'}"
+  provider_user_prompt_paths:
+    openai: "{prompts_dir / 'openai_user_alt.md'}"
+default_investigation_instructions: >
+  Investigate the context and return strict JSON.
+ai_providers:
+  openai:
+    enabled: true
+    api_key_env: "OPENAI_API_KEY"
+    model: "gpt-5.3"
+    api_base: "https://api.openai.com/v1"
+"""
+)
+
+request = InvestigationRequest(
+    context_text="Summarize product feedback by topic and sentiment.",
+    output_schema={
+        "type": "object",
+        "properties": {
+            "topics": {"type": "array", "items": {"type": "string"}},
+            "overall_sentiment": {"type": "string"},
+        },
+        "required": ["topics", "overall_sentiment"],
+        "additionalProperties": False,
+    },
+    investigation_instructions="Return strict JSON only.",
+    runtime_system_prompt_by_provider={
+        "openai": "You are a product analyst. Return strict JSON only.",
+    },
+    runtime_user_prompt_by_provider={
+        "openai": (
+            "Task: {investigation_instructions}\n\n"
+            "Context:\n{context_text}\n\n"
+            "Return JSON matching schema exactly with fields:\n"
+            "- topics: array of strings\n"
+            "- overall_sentiment: string"
+        )
+    },
+)
+
+result = client.run(request)
+single = next(r for r in result.provider_results if r.success)
+print(single.provider_name)
+print(single.parsed_payload)
+```
+
+Note: if you do not provide runtime prompts, the client uses configured prompt
+files (if set) or built-in fallback prompts.
+
+In `runtime_user_prompt_by_provider`, placeholders are resolved from request:
+
+- `{investigation_instructions}` -> value from
+  `InvestigationRequest.investigation_instructions`
+  (or config default if empty)
+- `{context_text}` -> value from `InvestigationRequest.context_text`
 
 ### Use multiple providers with consensus
 
@@ -202,6 +275,98 @@ request = InvestigationRequest(
     },
     runtime_user_prompt_by_provider={
         "gemini": "Analyze this context and produce strict JSON schema output.",
+    },
+)
+```
+
+## InvestigationRequest Runtime Controls (Deep Dive)
+
+These fields let you control behavior per request without changing base YAML.
+
+- `investigation_instructions: str`
+  - Purpose: task-level instruction for this specific run.
+  - Used by prompt rendering as `{investigation_instructions}`.
+  - If empty, the client uses `default_investigation_instructions` from config.
+  - Typical use: "Focus on leading indicators and return strict JSON only."
+
+- `estimated_fields: list[str]`
+  - Purpose: declare fields where uncertainty/probability is important.
+  - Used by prompt rendering as `{estimated_fields}` and for post-processing
+    field estimations in normalized provider results.
+  - Typical use: `["risk_level", "probability", "eta_days"]`.
+
+- `runtime_system_prompt_by_provider: dict[str, str]`
+  - Purpose: replace system prompt per provider for this run.
+  - Keys must be provider names (`openai`, `claude`, `gemini`, `grok`).
+  - Highest-priority source for system prompt resolution.
+  - Typical use: tune style/behavior for one provider without touching files.
+
+- `runtime_user_prompt_by_provider: dict[str, str]`
+  - Purpose: replace user prompt template/content per provider for this run.
+  - Also highest-priority for user prompt resolution.
+  - Use this when one provider needs extra formatting/schema guidance.
+
+- `runtime_provider_overrides: dict[str, dict[str, Any]]`
+  - Purpose: per-provider runtime settings overrides.
+  - Current supported keys:
+    - `default_system_prompt_path`
+    - `default_user_prompt_path`
+  - These are used when runtime prompt text is not directly provided.
+  - Typical use: switch prompt files for one request (A/B prompt testing).
+
+- `metadata: dict[str, Any]`
+  - Purpose: custom run metadata for observability and traceability.
+  - Stored in artifacts under `request.metadata`.
+  - Typical use: `run_id`, `scenario`, `tenant`, `experiment`.
+
+Prompt precedence per provider:
+
+1. `runtime_system_prompt_by_provider` / `runtime_user_prompt_by_provider`
+2. Prompt files from `runtime_provider_overrides` (if provided)
+3. Provider prompt paths from config (`prompts.provider_*_prompt_paths`)
+4. Provider-level default prompt paths in provider settings
+5. Global defaults (`prompts.default_*_prompt_path`), then built-in fallback
+
+Example using all runtime fields together:
+
+```python
+from ai_consensus_core import InvestigationRequest
+
+request = InvestigationRequest(
+    context_text="Q2 incidents increased in one region; staffing unchanged.",
+    output_schema={
+        "type": "object",
+        "properties": {
+            "summary": {"type": "string"},
+            "risk_level": {"type": "number"},
+            "eta_days": {"type": "number"},
+        },
+        "required": ["summary", "risk_level", "eta_days"],
+        "additionalProperties": False,
+    },
+    investigation_instructions=(
+        "Identify likely causes, quantify operational risk, and give ETA."
+    ),
+    estimated_fields=["risk_level", "eta_days"],
+    runtime_system_prompt_by_provider={
+        "openai": "You are an SRE analyst. Return strict JSON only.",
+    },
+    runtime_user_prompt_by_provider={
+        "gemini": (
+            "Assess incident trend from the context and return JSON "
+            "matching schema exactly."
+        ),
+    },
+    runtime_provider_overrides={
+        "claude": {
+            "default_system_prompt_path": "prompts/claude_system_alt.md",
+            "default_user_prompt_path": "prompts/claude_user_alt.md",
+        }
+    },
+    metadata={
+        "run_id": "incident-q2-001",
+        "scenario": "incident_triage",
+        "experiment": "prompt-v2",
     },
 )
 ```
@@ -234,6 +399,7 @@ request = InvestigationRequest(
 See `examples/`:
 
 - `basic_usage.py`
+- `single_provider_structured_response.py`
 - `demand_forecast_example.py`
 - `customer_churn_example.py`
 - `hiring_pipeline_example.py`

@@ -22,7 +22,12 @@ def create_providers(
     """Create enabled providers from typed package config."""
     resolved_logger = logger or logging.getLogger(__name__)
     providers: list[tuple[AIProvider, ProviderSettings]] = []
-    for provider_name, settings in config.providers.items():
+
+    # Missing provider config is treated as disabled.
+    for provider_name in PROVIDER_CLASS_MAP:
+        settings = config.providers.get(
+            provider_name, ProviderSettings(enabled=False)
+        )
         if not settings.enabled:
             resolved_logger.info(
                 "Provider %s disabled; skipping.", provider_name
@@ -53,6 +58,13 @@ def create_providers(
                 settings,
             )
         )
+
+    for configured_name in config.providers:
+        if configured_name not in PROVIDER_CLASS_MAP:
+            resolved_logger.warning(
+                "Unknown provider '%s'; skipping.", configured_name
+            )
+
     if not providers:
         raise RuntimeError(
             "No AI providers available after configuration and env checks."
